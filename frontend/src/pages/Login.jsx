@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";   // ADD THIS LINE
 import { useAuth } from "../context/AuthContext";
 import api from "../api/axios";
 
@@ -11,6 +12,7 @@ function Login() {
     const [message, setMessage] = useState("");
 
     const { login } = useAuth();
+    const navigate = useNavigate();
 
     const handleChange = (e) => {
         setFormData({
@@ -34,6 +36,7 @@ function Login() {
             );
 
             setMessage(response.data.message);
+            navigate("/sessions"); 
 
         } catch (error) {
             setMessage(
