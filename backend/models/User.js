@@ -62,6 +62,16 @@ const userSchema = new mongoose.Schema(
         points: {
             type: Number,
             default: 0
+        },
+
+        averageRating: {          // ADD THIS
+            type: Number,
+            default: 0
+        },
+
+        totalRatings: {           // ADD THIS
+            type: Number,
+            default: 0
         }
     },
     {
