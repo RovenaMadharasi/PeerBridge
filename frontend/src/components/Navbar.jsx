@@ -8,7 +8,8 @@ import {
     User,
     LogOut,
     Sparkles,
-    ShieldCheck
+    ShieldCheck,
+    FileText
 } from "lucide-react";
 
 function Navbar() {
@@ -45,6 +46,13 @@ function Navbar() {
                             className={`nav-link ${isActive("/sessions") ? "active" : ""}`}
                         >
                             <BookOpen size={18} /> Sessions
+                        </Link>
+
+                        <Link
+                            to="/quizzes"
+                            className={`nav-link ${isActive("/quizzes") ? "active" : ""}`}
+                        >
+                            <FileText size={18} /> Quizzes
                         </Link>
 
                         <Link

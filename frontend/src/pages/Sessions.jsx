@@ -11,7 +11,8 @@ import {
     Star,
     Award,
     HelpCircle,
-    Filter
+    Filter,
+    FileText
 } from "lucide-react";
 import QuizAttemptModal from "../components/QuizAttemptModal";
 import RatingModal from "../components/RatingModal";
@@ -21,6 +22,7 @@ function Sessions() {
 
     const [sessions, setSessions] = useState([]);
     const [mySessionsMap, setMySessionsMap] = useState(new Set());
+    const [quizStatusMap, setQuizStatusMap] = useState({}); // { sessionId: { quizId, status, isPublished } }
     const [loading, setLoading] = useState(true);
 
     const [search, setSearch] = useState("");
@@ -28,7 +30,7 @@ function Sessions() {
     const [difficulty, setDifficulty] = useState("");
     const [status, setStatus] = useState("upcoming");
 
-    const [alertMessage, setAlertMessage] = useState(null); // { type: 'success'|'danger', text: '' }
+    const [alertMessage, setAlertMessage] = useState(null);
 
     const [selectedQuizId, setSelectedQuizId] = useState(null);
     const [ratingSession, setRatingSession] = useState(null);
@@ -47,10 +49,31 @@ function Sessions() {
                 api.get("/sessions/mine")
             ]);
 
-            setSessions(sessRes.data.sessions || []);
+            const fetchedSessions = sessRes.data.sessions || [];
+            setSessions(fetchedSessions);
 
             const myRegistered = (mySessRes.data.sessions || mySessRes.data.registeredSessions || []).map((s) => s._id);
             setMySessionsMap(new Set(myRegistered));
+
+            // Fetch quiz status for each session
+            const qMap = {};
+            await Promise.all(
+                fetchedSessions.map(async (sess) => {
+                    try {
+                        const qRes = await api.get(`/quizzes/session/${sess._id}`);
+                        if (qRes.data.quiz) {
+                            qMap[sess._id] = {
+                                quizId: qRes.data.quiz._id,
+                                status: qRes.data.attemptStatus || "NOT_STARTED",
+                                isPublished: qRes.data.quiz.isPublished
+                            };
+                        }
+                    } catch (err) {
+                        // no quiz
+                    }
+                })
+            );
+            setQuizStatusMap(qMap);
         } catch (err) {
             console.error("Fetch sessions error:", err);
         } finally {
@@ -105,15 +128,13 @@ function Sessions() {
                 <form onSubmit={handleSearchSubmit} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "16px", alignItems: "end" }}>
                     <div className="form-group" style={{ marginBottom: 0 }}>
                         <label>Search Keyword</label>
-                        <div style={{ position: "relative" }}>
-                            <input
-                                type="text"
-                                className="form-control"
-                                placeholder="Search by title or subject..."
-                                value={search}
-                                onChange={(e) => setSearch(e.target.value)}
-                            />
-                        </div>
+                        <input
+                            type="text"
+                            className="form-control"
+                            placeholder="Search by title or subject..."
+                            value={search}
+                            onChange={(e) => setSearch(e.target.value)}
+                        />
                     </div>
 
                     <div className="form-group" style={{ marginBottom: 0 }}>
@@ -181,6 +202,8 @@ function Sessions() {
                         const isFull = seatsLeft <= 0;
                         const hasStarted = startsAtDate <= new Date();
 
+                        const quizInfo = quizStatusMap[sess._id];
+
                         return (
                             <div key={sess._id} className="card" style={{ display: "flex", flexDirection: "column", justifyContent: "space-between" }}>
                                 <div>
@@ -239,31 +262,54 @@ function Sessions() {
                                     </div>
 
                                     {/* Action Buttons */}
-                                    <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+                                    <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
                                         {isMentor ? (
-                                            <div style={{ fontSize: "0.85rem", color: "#4f46e5", fontWeight: "600", padding: "8px 0" }}>
-                                                👨‍🏫 You are the host of this session
+                                            <div style={{ fontSize: "0.85rem", color: "#4f46e5", fontWeight: "600", padding: "8px 0", textAlign: "center" }}>
+                                                👨‍🏫 You are hosting this session
                                             </div>
                                         ) : isRegistered ? (
                                             <>
-                                                <a
-                                                    href={sess.meetingLink}
-                                                    target="_blank"
-                                                    rel="noreferrer"
-                                                    className="btn btn-secondary"
-                                                    style={{ flex: 1, padding: "8px 12px", fontSize: "0.85rem" }}
-                                                >
-                                                    <Video size={16} /> Join Link
-                                                </a>
-
-                                                {hasStarted && (
-                                                    <button
-                                                        onClick={() => setRatingSession(sess)}
-                                                        className="btn btn-outline"
-                                                        style={{ padding: "8px 12px", fontSize: "0.85rem" }}
-                                                        title="Rate Mentor (+2 Pts)"
+                                                <div style={{ display: "flex", gap: "8px" }}>
+                                                    <a
+                                                        href={sess.meetingLink}
+                                                        target="_blank"
+                                                        rel="noreferrer"
+                                                        className="btn btn-secondary"
+                                                        style={{ flex: 1, padding: "8px 12px", fontSize: "0.85rem" }}
                                                     >
-                                                        <Star size={16} style={{ color: "#f59e0b" }} /> Rate
+                                                        <Video size={16} /> Join Link
+                                                    </a>
+
+                                                    {hasStarted && (
+                                                        <button
+                                                            onClick={() => setRatingSession(sess)}
+                                                            className="btn btn-outline"
+                                                            style={{ padding: "8px 12px", fontSize: "0.85rem" }}
+                                                            title="Rate Mentor (+2 Pts)"
+                                                        >
+                                                            <Star size={16} style={{ color: "#f59e0b" }} /> Rate
+                                                        </button>
+                                                    )}
+                                                </div>
+
+                                                {/* Post-Meeting Quiz Take / Result Button */}
+                                                {quizInfo && quizInfo.isPublished && (
+                                                    <button
+                                                        onClick={() => setSelectedQuizId(quizInfo.quizId)}
+                                                        className="btn btn-primary"
+                                                        style={{
+                                                            width: "100%",
+                                                            padding: "8px 12px",
+                                                            fontSize: "0.85rem",
+                                                            background: quizInfo.status === "SUBMITTED" || quizInfo.status === "AUTO_SUBMITTED" ? "#059669" : "#4f46e5"
+                                                        }}
+                                                    >
+                                                        <FileText size={16} />
+                                                        {quizInfo.status === "SUBMITTED" || quizInfo.status === "AUTO_SUBMITTED"
+                                                            ? "✅ Quiz Completed (View Review)"
+                                                            : quizInfo.status === "IN_PROGRESS"
+                                                            ? "⏱️ Resume Quiz Attempt"
+                                                            : "📝 Take Post-Session Quiz (+10-20 Pts)"}
                                                     </button>
                                                 )}
                                             </>
@@ -283,6 +329,15 @@ function Sessions() {
                         );
                     })}
                 </div>
+            )}
+
+            {/* Quiz Attempt Modal */}
+            {selectedQuizId && (
+                <QuizAttemptModal
+                    quizId={selectedQuizId}
+                    onClose={() => setSelectedQuizId(null)}
+                    onComplete={() => fetchSessions()}
+                />
             )}
 
             {/* Rating Modal */}

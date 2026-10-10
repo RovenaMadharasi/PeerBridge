@@ -31,7 +31,7 @@ class PointsService {
             const updatedUser = await User.findByIdAndUpdate(
                 userId,
                 { $inc: { points: points } },
-                { new: true }
+                { returnDocument: "after" }
             );
 
             if (updatedUser) {

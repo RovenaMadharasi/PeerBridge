@@ -9,6 +9,7 @@ import CreateSession from "./pages/CreateSession";
 import MySessions from "./pages/MySessions";
 import Leaderboard from "./pages/Leaderboard";
 import Resources from "./pages/Resources";
+import Quizzes from "./pages/Quizzes";
 import ProtectedRoute from "./components/ProtectedRoute";
 import Navbar from "./components/Navbar";
 
@@ -41,6 +42,7 @@ function AppRoutes() {
                 <Route path="/my-sessions" element={<ProtectedRoute><MySessions /></ProtectedRoute>} />
                 <Route path="/leaderboard" element={<ProtectedRoute><Leaderboard /></ProtectedRoute>} />
                 <Route path="/resources" element={<ProtectedRoute><Resources /></ProtectedRoute>} />
+                <Route path="/quizzes" element={<ProtectedRoute><Quizzes /></ProtectedRoute>} />
 
                 <Route path="*" element={<Navigate to={isLoggedIn ? "/dashboard" : "/login"} replace />} />
             </Routes>

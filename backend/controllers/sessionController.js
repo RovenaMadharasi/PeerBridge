@@ -215,7 +215,7 @@ exports.registerForSession = async (req, res) => {
                 }
             },
             { $addToSet: { registeredStudents: userId } },
-            { new: true }
+            { returnDocument: "after" }
         ).populate("mentorId", "name college");
 
         if (updated) {
