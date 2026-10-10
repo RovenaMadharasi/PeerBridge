@@ -1,546 +1,551 @@
 const Quiz = require("../models/Quiz");
-const QuizResult = require("../models/QuizResult");
+const QuizAttempt = require("../models/QuizAttempt");
 const Session = require("../models/Session");
+const PointsService = require("../services/PointsService");
+const { POINTS_RULES } = require("../config/pointsConfig");
 
-// Check whether the logged-in user is the mentor who owns the session
+// Helper: Check if logged-in user is session mentor owner
 const isSessionMentor = (session, userId) => {
     return session.mentorId.toString() === userId.toString();
 };
 
-// Check whether the logged-in user is registered for the session
+// Helper: Check if student is registered for session
 const isRegisteredStudent = (session, userId) => {
     return session.registeredStudents.some(
-        (entry) => entry.student.toString() === userId.toString()
+        (id) => id.toString() === userId.toString()
     );
 };
 
-// Hide correct answers before sending a quiz to a junior
-const sanitizeQuiz = (quiz) => {
-    return {
-        _id: quiz._id,
-        session: quiz.session,
-        title: quiz.title,
-        questions: quiz.questions.map((question) => ({
-            _id: question._id,
-            question: question.question,
-            options: question.options
-        })),
-        createdAt: quiz.createdAt,
-        updatedAt: quiz.updatedAt
-    };
+// Helper: Sanitize questions for student (hide correctIndex & explanation) - LLD 3.5.3 & QUIZ-F4, N1
+const sanitizeQuestionsForStudent = (questions) => {
+    return questions.map((q, idx) => ({
+        _id: q._id,
+        index: idx,
+        question: q.question,
+        options: q.options,
+        marks: q.marks || 1
+    }));
 };
 
-// Validate quiz questions
-const validateQuestions = (questions) => {
-    if (!Array.isArray(questions) || questions.length === 0) {
-        return "Quiz must contain at least one question.";
+// Helper: Auto-finalize attempt if server deadline + 5s passed (LLD 3.5.3 / 3.6)
+const finalizeIfExpired = async (attempt, quiz) => {
+    if (attempt.status !== "IN_PROGRESS") return attempt;
+
+    const now = new Date();
+    const expiryBufferMs = (quiz.timeLimitMin * 60 * 1000) + 5000;
+    const isExpired = now.getTime() > (new Date(attempt.startedAt).getTime() + expiryBufferMs);
+
+    if (isExpired) {
+        attempt.status = "AUTO_SUBMITTED";
+        attempt.submittedAt = now;
+
+        // Grade saved answers so far
+        let score = 0;
+        quiz.questions.forEach((q, idx) => {
+            const studentAns = attempt.answers.find((a) => a.questionIndex === idx);
+            if (studentAns && studentAns.selectedIndex === q.correctIndex) {
+                score += q.marks || 1;
+            }
+        });
+
+        attempt.score = score;
+        attempt.totalMarks = quiz.totalMarks || 1;
+        attempt.percent = Math.round((score / attempt.totalMarks) * 100);
+
+        // QUIZ_COMPLETE points = 10 + round(percent / 10)
+        const pts = POINTS_RULES.QUIZ_COMPLETE_BASE + Math.round(attempt.percent / 10);
+        attempt.pointsAwarded = pts;
+
+        await attempt.save();
+        await PointsService.award(attempt.studentId, "QUIZ_COMPLETE", quiz._id, pts, "Quiz");
     }
 
-    for (let i = 0; i < questions.length; i++) {
-        const question = questions[i];
-
-        if (
-            !question.question ||
-            typeof question.question !== "string" ||
-            !question.question.trim()
-        ) {
-            return `Question ${i + 1} must have text.`;
-        }
-
-        if (!Array.isArray(question.options) || question.options.length < 2) {
-            return `Question ${i + 1} must have at least 2 options.`;
-        }
-
-        if (
-            !Number.isInteger(question.correctAnswer) ||
-            question.correctAnswer < 0 ||
-            question.correctAnswer >= question.options.length
-        ) {
-            return `Question ${i + 1} has an invalid correct answer.`;
-        }
-    }
-
-    return null;
+    return attempt;
 };
-
 
 // =========================
-// CREATE QUIZ
-// Senior only
+// CREATE QUIZ FOR SESSION (Senior owner only)
 // =========================
 exports.createQuiz = async (req, res) => {
     try {
-        const { session: sessionId, title, questions } = req.body;
+        const sessionId = req.body.sessionId || req.body.session || req.params.sessionId;
+        const { title, timeLimitMin, questions } = req.body;
 
         if (!sessionId || !title || !questions) {
             return res.status(400).json({
-                message: "Session, title and questions are required."
+                message: "Session ID, quiz title, and questions are required."
             });
         }
 
         const session = await Session.findById(sessionId);
-
         if (!session) {
-            return res.status(404).json({
-                message: "Session not found."
-            });
+            return res.status(404).json({ message: "Session not found." });
         }
 
         if (!isSessionMentor(session, req.user._id)) {
-            return res.status(403).json({
-                message: "You can only create a quiz for your own session."
-            });
+            return res.status(403).json({ message: "You can only create a quiz for your own session." });
         }
 
-        // One quiz per session
-        const existingQuiz = await Quiz.findOne({ session: sessionId });
-
+        // Unique quiz per session check (LLD 3.3)
+        const existingQuiz = await Quiz.findOne({ sessionId });
         if (existingQuiz) {
-            return res.status(409).json({
-                message: "A quiz already exists for this session."
-            });
+            return res.status(409).json({ message: "A quiz already exists for this session." });
         }
 
-        const validationError = validateQuestions(questions);
-
-        if (validationError) {
-            return res.status(400).json({
-                message: validationError
-            });
+        if (!Array.isArray(questions) || questions.length === 0) {
+            return res.status(400).json({ message: "Quiz must contain at least one question." });
         }
+
+        // Validate each question
+        const formattedQuestions = questions.map((q, i) => {
+            const text = q.question || q.text;
+            const options = q.options;
+            const correctIndex = q.correctIndex !== undefined ? q.correctIndex : q.correctAnswer;
+
+            if (!text || !text.trim()) throw new Error(`Question ${i + 1} must have text.`);
+            if (!Array.isArray(options) || options.length < 2 || options.length > 6) {
+                throw new Error(`Question ${i + 1} must have between 2 and 6 options.`);
+            }
+            if (correctIndex === undefined || correctIndex < 0 || correctIndex >= options.length) {
+                throw new Error(`Question ${i + 1} must have a valid correct answer option index.`);
+            }
+
+            return {
+                question: text.trim(),
+                options: options.map((o) => String(o).trim()),
+                correctIndex: Number(correctIndex),
+                marks: Number(q.marks || 1),
+                explanation: q.explanation ? String(q.explanation).trim() : ""
+            };
+        });
 
         const quiz = await Quiz.create({
-            session: sessionId,
+            sessionId,
             title: title.trim(),
-            questions
+            timeLimitMin: Math.max(1, Number(timeLimitMin || 15)),
+            questions: formattedQuestions,
+            isPublished: req.body.isPublished !== undefined ? req.body.isPublished : true,
+            createdBy: req.user._id
         });
 
         res.status(201).json({
-            message: "Quiz created successfully.",
+            message: "Quiz created successfully",
             quiz
         });
     } catch (err) {
-        res.status(500).json({
-            message: err.message
-        });
+        res.status(400).json({ message: err.message });
     }
 };
 
-
 // =========================
-// GET QUIZ BY SESSION
-// Junior gets sanitized version
-// Senior owner gets full version
-// =========================
-exports.getQuizForSession = async (req, res) => {
-    try {
-        const session = await Session.findById(req.params.sessionId);
-
-        if (!session) {
-            return res.status(404).json({
-                message: "Session not found."
-            });
-        }
-
-        const quiz = await Quiz.findOne({
-            session: req.params.sessionId
-        });
-
-        if (!quiz) {
-            return res.status(404).json({
-                message: "Quiz not found for this session."
-            });
-        }
-
-        // Senior mentor can view the complete quiz
-        if (req.user.role === "senior") {
-            if (!isSessionMentor(session, req.user._id)) {
-                return res.status(403).json({
-                    message: "You can only view quizzes for your own sessions."
-                });
-            }
-
-            return res.json({ quiz });
-        }
-
-        // Junior must be registered
-        if (!isRegisteredStudent(session, req.user._id)) {
-            return res.status(403).json({
-                message: "You must be registered for this session to take the quiz."
-            });
-        }
-
-        res.json({
-            quiz: sanitizeQuiz(quiz)
-        });
-    } catch (err) {
-        res.status(500).json({
-            message: err.message
-        });
-    }
-};
-
-
-// =========================
-// GET QUIZ BY ID
-// =========================
-exports.getQuizById = async (req, res) => {
-    try {
-        const quiz = await Quiz.findById(req.params.quizId);
-
-        if (!quiz) {
-            return res.status(404).json({
-                message: "Quiz not found."
-            });
-        }
-
-        const session = await Session.findById(quiz.session);
-
-        if (!session) {
-            return res.status(404).json({
-                message: "Session not found."
-            });
-        }
-
-        if (req.user.role === "senior") {
-            if (!isSessionMentor(session, req.user._id)) {
-                return res.status(403).json({
-                    message: "You can only view quizzes for your own sessions."
-                });
-            }
-
-            return res.json({ quiz });
-        }
-
-        if (!isRegisteredStudent(session, req.user._id)) {
-            return res.status(403).json({
-                message: "You must be registered for this session to take the quiz."
-            });
-        }
-
-        res.json({
-            quiz: sanitizeQuiz(quiz)
-        });
-    } catch (err) {
-        res.status(500).json({
-            message: err.message
-        });
-    }
-};
-
-
-// =========================
-// UPDATE QUIZ
-// Senior only
+// UPDATE OR PUBLISH QUIZ (Senior owner only)
 // =========================
 exports.updateQuiz = async (req, res) => {
     try {
-        const quiz = await Quiz.findById(req.params.quizId);
-
+        const quizId = req.params.quizId || req.params.id;
+        const quiz = await Quiz.findById(quizId);
         if (!quiz) {
-            return res.status(404).json({
-                message: "Quiz not found."
-            });
+            return res.status(404).json({ message: "Quiz not found." });
         }
 
-        const session = await Session.findById(quiz.session);
-
-        if (!session) {
-            return res.status(404).json({
-                message: "Session not found."
-            });
+        const session = await Session.findById(quiz.sessionId);
+        if (!session || !isSessionMentor(session, req.user._id)) {
+            return res.status(403).json({ message: "You can only edit quizzes for your own sessions." });
         }
 
-        if (!isSessionMentor(session, req.user._id)) {
-            return res.status(403).json({
-                message: "You can only edit quizzes for your own sessions."
-            });
-        }
+        const { title, timeLimitMin, questions, isPublished } = req.body;
 
-        const { title, questions } = req.body;
-
-        if (title !== undefined) {
-            if (!title.trim()) {
-                return res.status(400).json({
-                    message: "Quiz title cannot be empty."
-                });
-            }
-
-            quiz.title = title.trim();
-        }
+        if (title !== undefined) quiz.title = title.trim();
+        if (timeLimitMin !== undefined) quiz.timeLimitMin = Math.max(1, Number(timeLimitMin));
+        if (isPublished !== undefined) quiz.isPublished = Boolean(isPublished);
 
         if (questions !== undefined) {
-            const validationError = validateQuestions(questions);
-
-            if (validationError) {
-                return res.status(400).json({
-                    message: validationError
-                });
+            if (!Array.isArray(questions) || questions.length === 0) {
+                return res.status(400).json({ message: "Quiz must contain at least one question." });
             }
 
-            quiz.questions = questions;
+            quiz.questions = questions.map((q) => ({
+                question: (q.question || q.text).trim(),
+                options: q.options,
+                correctIndex: q.correctIndex !== undefined ? q.correctIndex : q.correctAnswer,
+                marks: q.marks || 1,
+                explanation: q.explanation || ""
+            }));
         }
 
         await quiz.save();
 
         res.json({
-            message: "Quiz updated successfully.",
+            message: "Quiz updated successfully",
             quiz
         });
     } catch (err) {
-        res.status(500).json({
-            message: err.message
-        });
+        res.status(400).json({ message: err.message });
     }
 };
 
-
 // =========================
-// DELETE QUIZ
-// Senior only
+// GET QUIZ FOR SESSION
 // =========================
-exports.deleteQuiz = async (req, res) => {
+exports.getQuizForSession = async (req, res) => {
     try {
-        const quiz = await Quiz.findById(req.params.quizId);
-
-        if (!quiz) {
-            return res.status(404).json({
-                message: "Quiz not found."
-            });
-        }
-
-        const session = await Session.findById(quiz.session);
+        const sessionId = req.params.sessionId || req.params.id;
+        const session = await Session.findById(sessionId);
 
         if (!session) {
-            return res.status(404).json({
-                message: "Session not found."
-            });
+            return res.status(404).json({ message: "Session not found." });
         }
 
-        if (!isSessionMentor(session, req.user._id)) {
-            return res.status(403).json({
-                message: "You can only delete quizzes for your own sessions."
-            });
+        const quiz = await Quiz.findOne({ sessionId });
+        if (!quiz) {
+            return res.status(404).json({ message: "No quiz created for this session yet." });
         }
 
-        // Remove old results as well
-        await QuizResult.deleteMany({
-            quiz: quiz._id
-        });
+        const isMentor = isSessionMentor(session, req.user._id);
 
-        await quiz.deleteOne();
+        // Senior owner gets full quiz details with correct answers
+        if (isMentor) {
+            return res.json({ quiz, isMentor: true });
+        }
+
+        // Student must be registered
+        if (!isRegisteredStudent(session, req.user._id)) {
+            return res.status(403).json({ message: "You must be registered for this session to view or take the quiz." });
+        }
+
+        if (!quiz.isPublished) {
+            return res.status(403).json({ message: "This quiz has not been published by the mentor yet." });
+        }
+
+        // Check if student has an active or completed attempt
+        const attempt = await QuizAttempt.findOne({ quizId: quiz._id, studentId: req.user._id });
 
         res.json({
-            message: "Quiz deleted successfully."
+            quiz: {
+                _id: quiz._id,
+                sessionId: quiz.sessionId,
+                title: quiz.title,
+                timeLimitMin: quiz.timeLimitMin,
+                totalMarks: quiz.totalMarks,
+                questionCount: quiz.questions.length,
+                isPublished: quiz.isPublished
+            },
+            attemptStatus: attempt ? attempt.status : "NOT_STARTED",
+            attemptId: attempt ? attempt._id : null
         });
     } catch (err) {
-        res.status(500).json({
-            message: err.message
-        });
+        res.status(500).json({ message: err.message });
     }
 };
 
-
 // =========================
-// SUBMIT QUIZ
-// Junior only
+// START QUIZ ATTEMPT (Registered student - QUIZ-F8, N3, 3.5.3)
 // =========================
-exports.submitQuiz = async (req, res) => {
+exports.startQuizAttempt = async (req, res) => {
     try {
-        const quiz = await Quiz.findById(req.params.quizId);
+        const quizId = req.params.quizId || req.params.id;
+        const quiz = await Quiz.findById(quizId);
 
         if (!quiz) {
-            return res.status(404).json({
-                message: "Quiz not found."
-            });
+            return res.status(404).json({ message: "Quiz not found." });
         }
 
-        const session = await Session.findById(quiz.session);
-
+        const session = await Session.findById(quiz.sessionId);
         if (!session) {
-            return res.status(404).json({
-                message: "Session not found."
-            });
+            return res.status(404).json({ message: "Session not found." });
         }
 
         if (!isRegisteredStudent(session, req.user._id)) {
-            return res.status(403).json({
-                message: "You must be registered for this session to submit the quiz."
-            });
+            return res.status(403).json({ message: "You must be registered for this session to start the quiz." });
         }
 
-        const { answers } = req.body;
+        if (!quiz.isPublished) {
+            return res.status(403).json({ message: "Quiz is not published yet." });
+        }
 
-        if (!Array.isArray(answers)) {
+        const now = new Date();
+
+        // Award SESSION_ATTENDED points (+5 pts) on first quiz start or rating (LLD 3.5.4)
+        await PointsService.award(req.user._id, "SESSION_ATTENDED", session._id, POINTS_RULES.SESSION_ATTENDED, "Session");
+
+        // Unique index (quizId, studentId): second start returns the existing attempt (LLD 3.5.3)
+        let attempt = await QuizAttempt.findOne({ quizId: quiz._id, studentId: req.user._id });
+
+        if (!attempt) {
+            const deadlineAt = new Date(now.getTime() + quiz.timeLimitMin * 60 * 1000);
+
+            attempt = await QuizAttempt.create({
+                quizId: quiz._id,
+                sessionId: quiz.sessionId,
+                studentId: req.user._id,
+                startedAt: now,
+                deadlineAt,
+                status: "IN_PROGRESS",
+                answers: [],
+                totalMarks: quiz.totalMarks
+            });
+        } else {
+            attempt = await finalizeIfExpired(attempt, quiz);
+        }
+
+        // Return questions WITHOUT correctIndex and explanation (QUIZ-F4, N1, 3.5.3)
+        res.json({
+            attemptId: attempt._id,
+            serverNow: new Date(),
+            deadlineAt: attempt.deadlineAt,
+            status: attempt.status,
+            answers: attempt.answers,
+            timeLimitMin: quiz.timeLimitMin,
+            title: quiz.title,
+            questions: sanitizeQuestionsForStudent(quiz.questions)
+        });
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+};
+
+// =========================
+// AUTOSAVE ANSWER (Attempt owner - PATCH /api/attempts/:id/answer)
+// =========================
+exports.autosaveAnswer = async (req, res) => {
+    try {
+        const attemptId = req.params.id;
+        const { questionIndex, selectedIndex } = req.body;
+
+        let attempt = await QuizAttempt.findById(attemptId);
+        if (!attempt) {
+            return res.status(404).json({ message: "Quiz attempt not found." });
+        }
+
+        if (attempt.studentId.toString() !== req.user._id.toString()) {
+            return res.status(403).json({ message: "Unauthorized attempt access." });
+        }
+
+        const quiz = await Quiz.findById(attempt.quizId);
+        attempt = await finalizeIfExpired(attempt, quiz);
+
+        if (attempt.status !== "IN_PROGRESS") {
             return res.status(400).json({
-                message: "Answers must be an array."
+                message: "Attempt is closed or already submitted.",
+                status: attempt.status
             });
         }
 
-        if (answers.length !== quiz.questions.length) {
-            return res.status(400).json({
-                message: "Please answer all questions."
-            });
-        }
-
-        // Validate every answer
-        for (let i = 0; i < answers.length; i++) {
-            if (
-                !Number.isInteger(answers[i]) ||
-                answers[i] < 0 ||
-                answers[i] >= quiz.questions[i].options.length
-            ) {
-                return res.status(400).json({
-                    message: `Invalid answer for question ${i + 1}.`
+        if (questionIndex !== undefined && selectedIndex !== undefined) {
+            const existingIdx = attempt.answers.findIndex((a) => a.questionIndex === Number(questionIndex));
+            if (existingIdx >= 0) {
+                attempt.answers[existingIdx].selectedIndex = Number(selectedIndex);
+            } else {
+                attempt.answers.push({
+                    questionIndex: Number(questionIndex),
+                    selectedIndex: Number(selectedIndex)
                 });
             }
+            await attempt.save();
         }
 
-        // Prevent multiple submissions
-        const existingResult = await QuizResult.findOne({
-            quiz: quiz._id,
-            student: req.user._id
+        res.json({
+            message: "Answer saved successfully",
+            status: attempt.status,
+            answers: attempt.answers
         });
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+};
 
-        if (existingResult) {
-            return res.status(409).json({
-                message: "You have already submitted this quiz."
+// =========================
+// SUBMIT QUIZ ATTEMPT (POST /api/attempts/:id/submit)
+// =========================
+exports.submitQuizAttempt = async (req, res) => {
+    try {
+        const attemptId = req.params.id;
+        let attempt = await QuizAttempt.findById(attemptId);
+
+        if (!attempt) {
+            return res.status(404).json({ message: "Quiz attempt not found." });
+        }
+
+        if (attempt.studentId.toString() !== req.user._id.toString()) {
+            return res.status(403).json({ message: "Unauthorized attempt submission." });
+        }
+
+        const quiz = await Quiz.findById(attempt.quizId);
+        if (!quiz) {
+            return res.status(404).json({ message: "Associated quiz not found." });
+        }
+
+        if (attempt.status === "SUBMITTED" || attempt.status === "AUTO_SUBMITTED") {
+            // Already submitted - return stored result (TC14: submit same quiz again -> same result, points not added twice)
+            return res.json({
+                message: "Quiz already submitted.",
+                score: attempt.score,
+                totalMarks: attempt.totalMarks,
+                percent: attempt.percent,
+                pointsAwarded: attempt.pointsAwarded,
+                status: attempt.status,
+                review: quiz.questions.map((q, idx) => ({
+                    questionIndex: idx,
+                    question: q.question,
+                    options: q.options,
+                    correctIndex: q.correctIndex,
+                    marks: q.marks,
+                    explanation: q.explanation
+                }))
             });
         }
 
+        const now = new Date();
+        const expiryBufferMs = (quiz.timeLimitMin * 60 * 1000) + 5000;
+        const isExpired = now.getTime() > (new Date(attempt.startedAt).getTime() + expiryBufferMs);
+
+        attempt.status = isExpired ? "AUTO_SUBMITTED" : "SUBMITTED";
+        attempt.submittedAt = now;
+
+        // Optionally update final answers array from request body if passed
+        if (Array.isArray(req.body.answers)) {
+            req.body.answers.forEach((ans) => {
+                const qIdx = ans.questionIndex !== undefined ? ans.questionIndex : ans.index;
+                const sIdx = ans.selectedIndex !== undefined ? ans.selectedIndex : ans.selected;
+                if (qIdx !== undefined && sIdx !== undefined) {
+                    const ex = attempt.answers.findIndex((a) => a.questionIndex === Number(qIdx));
+                    if (ex >= 0) {
+                        attempt.answers[ex].selectedIndex = Number(sIdx);
+                    } else {
+                        attempt.answers.push({ questionIndex: Number(qIdx), selectedIndex: Number(sIdx) });
+                    }
+                }
+            });
+        }
+
+        // Server-side grading logic (LLD 3.5.3)
         let score = 0;
-
-        quiz.questions.forEach((question, index) => {
-            if (answers[index] === question.correctAnswer) {
-                score++;
+        quiz.questions.forEach((q, idx) => {
+            const studentAns = attempt.answers.find((a) => a.questionIndex === idx);
+            if (studentAns && studentAns.selectedIndex === q.correctIndex) {
+                score += q.marks || 1;
             }
         });
 
-        const result = await QuizResult.create({
-            quiz: quiz._id,
-            student: req.user._id,
-            answers,
-            score,
-            totalQuestions: quiz.questions.length
+        attempt.score = score;
+        attempt.totalMarks = quiz.totalMarks || 1;
+        attempt.percent = Math.round((score / attempt.totalMarks) * 100);
+
+        // QUIZ_COMPLETE points = 10 + round(percent / 10)
+        const pts = POINTS_RULES.QUIZ_COMPLETE_BASE + Math.round(attempt.percent / 10);
+        attempt.pointsAwarded = pts;
+
+        await attempt.save();
+
+        // Award points to user
+        const awardResult = await PointsService.award(attempt.studentId, "QUIZ_COMPLETE", quiz._id, pts, "Quiz");
+
+        // Build question review with correct answers & explanations (sent ONLY after submit - QUIZ-F4, LLD 3.4)
+        const review = quiz.questions.map((q, idx) => {
+            const studentAns = attempt.answers.find((a) => a.questionIndex === idx);
+            return {
+                questionIndex: idx,
+                question: q.question,
+                options: q.options,
+                selectedIndex: studentAns ? studentAns.selectedIndex : null,
+                correctIndex: q.correctIndex,
+                isCorrect: studentAns ? studentAns.selectedIndex === q.correctIndex : false,
+                marks: q.marks,
+                explanation: q.explanation
+            };
         });
 
-        res.status(201).json({
-            message: "Quiz submitted successfully.",
-            result: {
-                _id: result._id,
-                quiz: result.quiz,
-                score: result.score,
-                totalQuestions: result.totalQuestions,
-                percentage: Math.round(
-                    (result.score / result.totalQuestions) * 100
-                ),
-                submittedAt: result.createdAt
-            }
+        res.json({
+            message: "Quiz submitted and graded successfully",
+            attemptId: attempt._id,
+            score: attempt.score,
+            totalMarks: attempt.totalMarks,
+            percent: attempt.percent,
+            pointsAwarded: pts,
+            userBadge: awardResult.badge,
+            status: attempt.status,
+            review
         });
     } catch (err) {
-        res.status(500).json({
-            message: err.message
-        });
+        res.status(500).json({ message: err.message });
     }
 };
 
-
 // =========================
-// GET MY RESULT
-// Junior only
+// GET ATTEMPT RESULT (Attempt owner)
 // =========================
-exports.getMyResult = async (req, res) => {
+exports.getAttemptResult = async (req, res) => {
     try {
-        const quiz = await Quiz.findById(req.params.quizId);
+        const attemptId = req.params.id;
+        const attempt = await QuizAttempt.findById(attemptId);
 
-        if (!quiz) {
-            return res.status(404).json({
-                message: "Quiz not found."
-            });
+        if (!attempt) {
+            return res.status(404).json({ message: "Attempt not found." });
         }
 
-        const result = await QuizResult.findOne({
-            quiz: quiz._id,
-            student: req.user._id
+        if (attempt.studentId.toString() !== req.user._id.toString()) {
+            return res.status(403).json({ message: "Unauthorized access to attempt result." });
+        }
+
+        const quiz = await Quiz.findById(attempt.quizId);
+
+        const review = quiz.questions.map((q, idx) => {
+            const studentAns = attempt.answers.find((a) => a.questionIndex === idx);
+            return {
+                questionIndex: idx,
+                question: q.question,
+                options: q.options,
+                selectedIndex: studentAns ? studentAns.selectedIndex : null,
+                correctIndex: q.correctIndex,
+                isCorrect: studentAns ? studentAns.selectedIndex === q.correctIndex : false,
+                marks: q.marks,
+                explanation: q.explanation
+            };
         });
-
-        if (!result) {
-            return res.status(404).json({
-                message: "You have not submitted this quiz yet."
-            });
-        }
 
         res.json({
-            result: {
-                _id: result._id,
-                quiz: result.quiz,
-                score: result.score,
-                totalQuestions: result.totalQuestions,
-                percentage: Math.round(
-                    (result.score / result.totalQuestions) * 100
-                ),
-                submittedAt: result.createdAt
-            }
+            attemptId: attempt._id,
+            quizTitle: quiz.title,
+            score: attempt.score,
+            totalMarks: attempt.totalMarks,
+            percent: attempt.percent,
+            pointsAwarded: attempt.pointsAwarded,
+            status: attempt.status,
+            submittedAt: attempt.submittedAt || attempt.updatedAt,
+            review
         });
     } catch (err) {
-        res.status(500).json({
-            message: err.message
-        });
+        res.status(500).json({ message: err.message });
     }
 };
 
-
 // =========================
-// GET ALL RESULTS
-// Senior only
+// GET ALL QUIZ RESULTS FOR SESSION (Senior owner only)
 // =========================
-exports.getQuizResults = async (req, res) => {
+exports.getQuizResultsForMentor = async (req, res) => {
     try {
-        const quiz = await Quiz.findById(req.params.quizId);
-
+        const quizId = req.params.quizId || req.params.id;
+        const quiz = await Quiz.findById(quizId);
         if (!quiz) {
-            return res.status(404).json({
-                message: "Quiz not found."
-            });
+            return res.status(404).json({ message: "Quiz not found." });
         }
 
-        const session = await Session.findById(quiz.session);
-
-        if (!session) {
-            return res.status(404).json({
-                message: "Session not found."
-            });
+        const session = await Session.findById(quiz.sessionId);
+        if (!session || !isSessionMentor(session, req.user._id)) {
+            return res.status(403).json({ message: "You can only view results for your own quizzes." });
         }
 
-        if (!isSessionMentor(session, req.user._id)) {
-            return res.status(403).json({
-                message: "You can only view results for your own quizzes."
-            });
-        }
-
-        const results = await QuizResult.find({
-            quiz: quiz._id
-        })
-            .populate("student", "name email college year")
-            .sort({ createdAt: -1 });
-
-        const formattedResults = results.map((result) => ({
-            _id: result._id,
-            student: result.student,
-            score: result.score,
-            totalQuestions: result.totalQuestions,
-            percentage: Math.round(
-                (result.score / result.totalQuestions) * 100
-            ),
-            submittedAt: result.createdAt
-        }));
+        const attempts = await QuizAttempt.find({ quizId: quiz._id })
+            .populate("studentId", "name email college year points badge photo photoUrl")
+            .sort({ submittedAt: -1 });
 
         res.json({
-            results: formattedResults
+            quizTitle: quiz.title,
+            totalMarks: quiz.totalMarks,
+            attemptCount: attempts.length,
+            results: attempts
         });
     } catch (err) {
-        res.status(500).json({
-            message: err.message
-        });
+        res.status(500).json({ message: err.message });
     }
 };

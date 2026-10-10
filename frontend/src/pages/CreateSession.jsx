@@ -1,14 +1,12 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import api from "../api/axios";
+import { PlusCircle, Calendar, Link as LinkIcon, Users, ArrowLeft } from "lucide-react";
 
 function CreateSession() {
-    const { token } = useAuth();
+    const { user } = useAuth();
     const navigate = useNavigate();
-
-    const [role, setRole] = useState(null);
-    const [message, setMessage] = useState("");
 
     const [formData, setFormData] = useState({
         title: "",
@@ -18,28 +16,15 @@ function CreateSession() {
         topic: "",
         difficulty: "Beginner",
         date: "",
-        startTime: "",
-        endTime: "",
+        time: "",
         meetingPlatform: "Google Meet",
         meetingLink: "",
-        maxStudents: 30,
+        maxSeats: 30,
         tags: ""
     });
 
-    useEffect(() => {
-        const checkRole = async () => {
-            try {
-                const response = await api.get("/auth/me", {
-                    headers: { Authorization: `Bearer ${token}` }
-                });
-                setRole(response.data.user.role);
-            } catch (error) {
-                setMessage("Failed to verify your account");
-            }
-        };
-
-        if (token) checkRole();
-    }, [token]);
+    const [error, setError] = useState("");
+    const [submitting, setSubmitting] = useState(false);
 
     const handleChange = (e) => {
         setFormData({ ...formData, [e.target.name]: e.target.value });
@@ -47,76 +32,243 @@ function CreateSession() {
 
     const handleSubmit = async (e) => {
         e.preventDefault();
+        setError("");
+
+        if (!formData.title || !formData.subject || !formData.date || !formData.time || !formData.meetingLink) {
+            setError("Please fill in all required fields.");
+            return;
+        }
+
+        if (!/^https?:\/\/.+/i.test(formData.meetingLink.trim())) {
+            setError("Meeting link must be a valid URL starting with http:// or https://");
+            return;
+        }
+
+        // Combine date & time into UTC ISO startsAt
+        const startsAtDate = new Date(`${formData.date}T${formData.time}`);
+        if (isNaN(startsAtDate.getTime())) {
+            setError("Please select a valid date and time.");
+            return;
+        }
+
+        if (startsAtDate <= new Date()) {
+            setError("Session start time must be in the future.");
+            return;
+        }
 
         try {
-            const response = await api.post(
-                "/sessions",
-                {
-                    ...formData,
-                    maxStudents: Number(formData.maxStudents),
-                    tags: formData.tags.split(",").map((t) => t.trim()).filter((t) => t !== "")
-                },
-                { headers: { Authorization: `Bearer ${token}` } }
-            );
+            setSubmitting(true);
+            await api.post("/sessions", {
+                ...formData,
+                startsAt: startsAtDate.toISOString(),
+                maxSeats: Number(formData.maxSeats),
+                maxStudents: Number(formData.maxSeats),
+                tags: formData.tags ? formData.tags.split(",").map((t) => t.trim()).filter(Boolean) : []
+            });
 
-            setMessage(response.data.message);
             navigate("/my-sessions");
-
-        } catch (error) {
-            setMessage(error.response?.data?.message || "Failed to create session");
+        } catch (err) {
+            setError(err.response?.data?.message || "Failed to create session.");
+        } finally {
+            setSubmitting(false);
         }
     };
 
-    if (role === null) {
-        return <p>{message || "Loading..."}</p>;
-    }
-
-    if (role !== "senior") {
-        return <p>Only senior students can create sessions.</p>;
+    if (user?.role !== "senior") {
+        return (
+            <div className="container" style={{ maxWidth: "600px", paddingTop: "60px", textAlign: "center" }}>
+                <div className="card">
+                    <h2 style={{ fontSize: "1.5rem", fontWeight: "700", color: "#dc2626", marginBottom: "12px" }}>
+                        Access Restricted (Senior Mentors Only)
+                    </h2>
+                    <p style={{ color: "#64748b", marginBottom: "20px" }}>
+                        Only Year 3 and Year 4 senior students can create and host peer learning sessions.
+                    </p>
+                    <button onClick={() => navigate("/sessions")} className="btn btn-primary">
+                        Browse Available Sessions
+                    </button>
+                </div>
+            </div>
+        );
     }
 
     return (
-        <div>
-            <h1>PeerBridge</h1>
-            <h2>Create a Learning Session</h2>
+        <div className="container" style={{ maxWidth: "720px" }}>
+            <div style={{ marginBottom: "24px" }}>
+                <button onClick={() => navigate(-1)} className="btn btn-outline" style={{ marginBottom: "16px", padding: "6px 12px" }}>
+                    <ArrowLeft size={16} /> Back
+                </button>
+                <h1 style={{ fontSize: "1.75rem", fontWeight: "800", color: "#0f172a" }}>Schedule a Peer Learning Session</h1>
+                <p style={{ color: "#64748b", fontSize: "0.95rem" }}>
+                    Host a session to share your knowledge, guide juniors, and earn mentor ratings
+                </p>
+            </div>
 
-            <form onSubmit={handleSubmit}>
-                <input type="text" name="title" placeholder="Session Title" value={formData.title} onChange={handleChange} required />
-                <textarea name="description" placeholder="Description" value={formData.description} onChange={handleChange} />
+            {error && <div className="alert alert-danger">{error}</div>}
 
-                <select name="category" value={formData.category} onChange={handleChange}>
-                    <option value="Academic">Academic</option>
-                    <option value="Career Preparation">Career Preparation</option>
-                </select>
+            <div className="card" style={{ padding: "32px" }}>
+                <form onSubmit={handleSubmit}>
+                    <div className="form-group">
+                        <label>Session Title *</label>
+                        <input
+                            type="text"
+                            name="title"
+                            className="form-control"
+                            placeholder="e.g. Master Graph Algorithms & Dynamic Programming"
+                            value={formData.title}
+                            onChange={handleChange}
+                            required
+                        />
+                    </div>
 
-                <input type="text" name="subject" placeholder="Subject (e.g. DBMS)" value={formData.subject} onChange={handleChange} required />
-                <input type="text" name="topic" placeholder="Topic (e.g. Normalization)" value={formData.topic} onChange={handleChange} />
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
+                        <div className="form-group">
+                            <label>Category *</label>
+                            <select name="category" className="form-control" value={formData.category} onChange={handleChange}>
+                                <option value="Academic">Academic</option>
+                                <option value="Career Preparation">Career Preparation</option>
+                                <option value="Coding & Tech">Coding & Tech</option>
+                                <option value="Soft Skills">Soft Skills</option>
+                                <option value="Other">Other</option>
+                            </select>
+                        </div>
 
-                <select name="difficulty" value={formData.difficulty} onChange={handleChange}>
-                    <option value="Beginner">Beginner</option>
-                    <option value="Intermediate">Intermediate</option>
-                    <option value="Advanced">Advanced</option>
-                </select>
+                        <div className="form-group">
+                            <label>Difficulty Level *</label>
+                            <select name="difficulty" className="form-control" value={formData.difficulty} onChange={handleChange}>
+                                <option value="Beginner">Beginner</option>
+                                <option value="Intermediate">Intermediate</option>
+                                <option value="Advanced">Advanced</option>
+                            </select>
+                        </div>
+                    </div>
 
-                <input type="date" name="date" value={formData.date} onChange={handleChange} required />
-                <input type="time" name="startTime" value={formData.startTime} onChange={handleChange} required />
-                <input type="time" name="endTime" value={formData.endTime} onChange={handleChange} required />
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
+                        <div className="form-group">
+                            <label>Subject *</label>
+                            <input
+                                type="text"
+                                name="subject"
+                                className="form-control"
+                                placeholder="e.g. Computer Science / Data Structures"
+                                value={formData.subject}
+                                onChange={handleChange}
+                                required
+                            />
+                        </div>
 
-                <select name="meetingPlatform" value={formData.meetingPlatform} onChange={handleChange}>
-                    <option value="Google Meet">Google Meet</option>
-                    <option value="Zoom">Zoom</option>
-                    <option value="Microsoft Teams">Microsoft Teams</option>
-                    <option value="Other">Other</option>
-                </select>
+                        <div className="form-group">
+                            <label>Specific Topic</label>
+                            <input
+                                type="text"
+                                name="topic"
+                                className="form-control"
+                                placeholder="e.g. Dijkstra & BFS Traversals"
+                                value={formData.topic}
+                                onChange={handleChange}
+                            />
+                        </div>
+                    </div>
 
-                <input type="text" name="meetingLink" placeholder="Meeting Link" value={formData.meetingLink} onChange={handleChange} required />
-                <input type="number" name="maxStudents" min="1" value={formData.maxStudents} onChange={handleChange} required />
-                <input type="text" name="tags" placeholder="Tags separated by commas" value={formData.tags} onChange={handleChange} />
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "16px" }}>
+                        <div className="form-group">
+                            <label>Date *</label>
+                            <input
+                                type="date"
+                                name="date"
+                                className="form-control"
+                                value={formData.date}
+                                onChange={handleChange}
+                                required
+                            />
+                        </div>
 
-                <button type="submit">Create Session</button>
-            </form>
+                        <div className="form-group">
+                            <label>Start Time *</label>
+                            <input
+                                type="time"
+                                name="time"
+                                className="form-control"
+                                value={formData.time}
+                                onChange={handleChange}
+                                required
+                            />
+                        </div>
 
-            {message && <p>{message}</p>}
+                        <div className="form-group">
+                            <label>Max Capacity (Seats) *</label>
+                            <input
+                                type="number"
+                                name="maxSeats"
+                                min="1"
+                                max="500"
+                                className="form-control"
+                                value={formData.maxSeats}
+                                onChange={handleChange}
+                                required
+                            />
+                        </div>
+                    </div>
+
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: "16px" }}>
+                        <div className="form-group">
+                            <label>Meeting Platform</label>
+                            <select name="meetingPlatform" className="form-control" value={formData.meetingPlatform} onChange={handleChange}>
+                                <option value="Google Meet">Google Meet</option>
+                                <option value="Zoom">Zoom</option>
+                                <option value="Microsoft Teams">Microsoft Teams</option>
+                                <option value="Other">Other</option>
+                            </select>
+                        </div>
+
+                        <div className="form-group">
+                            <label>Meeting Link (http / https) *</label>
+                            <input
+                                type="url"
+                                name="meetingLink"
+                                className="form-control"
+                                placeholder="https://meet.google.com/abc-defg-hij"
+                                value={formData.meetingLink}
+                                onChange={handleChange}
+                                required
+                            />
+                        </div>
+                    </div>
+
+                    <div className="form-group">
+                        <label>Session Description & Objectives</label>
+                        <textarea
+                            name="description"
+                            className="form-control"
+                            rows="4"
+                            placeholder="Describe what juniors will learn in this session and any prerequisites..."
+                            value={formData.description}
+                            onChange={handleChange}
+                        />
+                    </div>
+
+                    <div className="form-group">
+                        <label>Tags (comma separated)</label>
+                        <input
+                            type="text"
+                            name="tags"
+                            className="form-control"
+                            placeholder="dsa, algorithms, python, PlacementPrep"
+                            value={formData.tags}
+                            onChange={handleChange}
+                        />
+                    </div>
+
+                    <button
+                        type="submit"
+                        disabled={submitting}
+                        className="btn btn-primary"
+                        style={{ width: "100%", padding: "12px", marginTop: "12px" }}
+                    >
+                        <PlusCircle size={18} /> {submitting ? "Publishing Session..." : "Create & Publish Session"}
+                    </button>
+                </form>
+            </div>
         </div>
     );
 }

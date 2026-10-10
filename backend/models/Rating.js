@@ -10,14 +10,23 @@ const ratingSchema = new mongoose.Schema(
         explanationQuality: { type: Number, required: true, min: 1, max: 5 },
         communication: { type: Number, required: true, min: 1, max: 5 },
         usefulness: { type: Number, required: true, min: 1, max: 5 },
-        overallRating: { type: Number, required: true, min: 1, max: 5 },
+        overall: { type: Number, required: true, min: 1, max: 5 },
+        overallRating: { type: Number, min: 1, max: 5 }, // Alias
 
-        feedback: { type: String, default: "", trim: true }
+        feedback: { type: String, default: "", maxlength: 500, trim: true }
     },
     { timestamps: true }
 );
 
-// one rating per student per session — prevents duplicate ratings at the database level
+ratingSchema.pre("save", function () {
+    if (this.overall && !this.overallRating) {
+        this.overallRating = this.overall;
+    } else if (this.overallRating && !this.overall) {
+        this.overall = this.overallRating;
+    }
+});
+
+// One rating per student per session (LLD 3.3)
 ratingSchema.index({ sessionId: 1, studentId: 1 }, { unique: true });
 
 module.exports = mongoose.model("Rating", ratingSchema);

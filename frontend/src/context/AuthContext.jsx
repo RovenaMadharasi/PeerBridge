@@ -1,18 +1,41 @@
-import { createContext, useContext, useState } from "react";
+import { createContext, useContext, useState, useEffect } from "react";
+import api from "../api/axios";
 
 const AuthContext = createContext();
 
 export function AuthProvider({ children }) {
-    const [token, setToken] = useState(
-        localStorage.getItem("token")
-    );
-
+    const [token, setToken] = useState(localStorage.getItem("token"));
     const [user, setUser] = useState(null);
+    const [loading, setLoading] = useState(true);
 
-    const login = (token, user) => {
-        localStorage.setItem("token", token);
-        setToken(token);
-        setUser(user);
+    const fetchMe = async () => {
+        if (!token) {
+            setUser(null);
+            setLoading(false);
+            return;
+        }
+
+        try {
+            const res = await api.get("/auth/me");
+            setUser(res.data.user);
+        } catch (err) {
+            console.error("Failed to restore user auth session:", err);
+            localStorage.removeItem("token");
+            setToken(null);
+            setUser(null);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        fetchMe();
+    }, [token]);
+
+    const login = (newToken, newUser) => {
+        localStorage.setItem("token", newToken);
+        setToken(newToken);
+        setUser(newUser);
     };
 
     const logout = () => {
@@ -21,13 +44,19 @@ export function AuthProvider({ children }) {
         setUser(null);
     };
 
+    const refreshUser = async () => {
+        await fetchMe();
+    };
+
     return (
         <AuthContext.Provider
             value={{
                 token,
                 user,
+                loading,
                 login,
                 logout,
+                refreshUser,
                 isLoggedIn: !!token
             }}
         >
