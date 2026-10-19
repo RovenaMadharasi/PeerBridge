@@ -32,6 +32,12 @@ function Signup() {
         e.preventDefault();
         setError("");
 
+        // Validate institutional email domain
+        if (!formData.email.toLowerCase().trim().endsWith("@ssn.edu.in")) {
+            setError("Only SSN institutional email addresses (@ssn.edu.in) are allowed to register.");
+            return;
+        }
+
         try {
             setLoading(true);
             const response = await api.post("/auth/register", {
@@ -78,12 +84,12 @@ function Signup() {
                     </div>
 
                     <div className="form-group">
-                        <label>College Email</label>
+                        <label>College Email <span style={{ color: "#64748b", fontSize: "0.8rem", fontWeight: 400 }}>(@ssn.edu.in only)</span></label>
                         <input
                             type="email"
                             name="email"
                             className="form-control"
-                            placeholder="john@college.edu"
+                            placeholder="yourname@ssn.edu.in"
                             value={formData.email}
                             onChange={handleChange}
                             required

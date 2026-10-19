@@ -45,6 +45,13 @@ exports.signup = async (req, res) => {
             });
         }
 
+        // Restrict registration to SSN institutional email addresses only
+        if (!email.toLowerCase().trim().endsWith("@ssn.edu.in")) {
+            return res.status(400).json({
+                message: "Only SSN institutional email addresses (@ssn.edu.in) are allowed to register."
+            });
+        }
+
         const parsedYear = Number(year);
         if (isNaN(parsedYear) || parsedYear < 1 || parsedYear > 4) {
             return res.status(400).json({

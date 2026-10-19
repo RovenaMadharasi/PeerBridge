@@ -24,6 +24,10 @@ function Navbar() {
 
     const isActive = (path) => location.pathname === path;
 
+    // Hide navbar entirely on auth pages
+    const authRoutes = ["/login", "/signup"];
+    if (authRoutes.includes(location.pathname)) return null;
+
     return (
         <header className="navbar">
             <Link to={isLoggedIn ? "/dashboard" : "/login"} className="nav-brand">

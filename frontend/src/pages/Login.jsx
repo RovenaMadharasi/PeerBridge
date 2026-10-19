@@ -56,12 +56,12 @@ function Login() {
 
                 <form onSubmit={handleSubmit}>
                     <div className="form-group">
-                        <label>College Email</label>
+                        <label>College Email <span style={{ color: "#64748b", fontSize: "0.8rem", fontWeight: 400 }}>(@ssn.edu.in only)</span></label>
                         <input
                             type="email"
                             name="email"
                             className="form-control"
-                            placeholder="student@college.edu"
+                            placeholder="yourname@ssn.edu.in"
                             value={formData.email}
                             onChange={handleChange}
                             required
